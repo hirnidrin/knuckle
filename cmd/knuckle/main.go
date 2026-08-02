@@ -108,6 +108,10 @@ func main() {
 	logger := slog.New(slog.NewTextHandler(logWriter, &slog.HandlerOptions{
 		Level: slog.LevelDebug,
 	}))
+	// Packages that log via the package-level slog functions (probe) must reach
+	// the log file too — the default handler writes to stderr, which paints
+	// over the TUI and loses the record.
+	slog.SetDefault(logger)
 
 	logger.Info("knuckle starting", "version", version, "dry-run", dryRun, "channel", channel)
 
@@ -207,6 +211,7 @@ func runHeadlessWithRunner(configPath string, dryRun bool, logFile string, cmdRu
 	logger := slog.New(slog.NewTextHandler(logWriter, &slog.HandlerOptions{
 		Level: slog.LevelDebug,
 	}))
+	slog.SetDefault(logger)
 
 	// Load config
 	cfg, err := headless.LoadConfig(configPath)

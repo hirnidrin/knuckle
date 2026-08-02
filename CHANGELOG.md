@@ -10,6 +10,23 @@ file is the curated, human-readable history.
 ## [Unreleased]
 
 ### Added
+- The disk list flags occupied disks with their partition count, so a disk
+  holding an existing installation is visible before it is selected.
+
+### Fixed
+- Disk discovery no longer hides internal disks that the kernel flags as
+  removable. Flatcar's 6.6 kernel reports some SATA SSDs as removable (seen on
+  a Supermicro M11SDV with a Crucial M500), which excluded a valid install
+  target; the installer's own media is now identified by USB transport or an
+  iso9660 filesystem instead. Disks holding an existing OS install remain
+  selectable — only devices backing the running system are excluded, now
+  detected through nested layouts (LVM/LUKS) as well as direct partitions.
+
+### Internal
+- Skipped disks are logged with a reason, and package-level `slog` output is
+  routed to the log file rather than stderr, where it painted over the TUI.
+
+### Added
 - Flatcar Discord community links on the welcome and install-done screens
   (#117).
 - `.github/release.yml` to group auto-generated release notes by label

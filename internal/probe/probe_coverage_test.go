@@ -59,8 +59,10 @@ func TestListDisks_SmallDiskFiltered(t *testing.T) {
 	}
 }
 
-func TestListDisks_RemovableDiskFiltered(t *testing.T) {
-	js := buildSingleDiskJSON("/dev/sdc", 64*1024*1024*1024, "disk", true, nil)
+func TestListDisks_USBDiskFiltered(t *testing.T) {
+	// The installer stick — excluded by transport, not by the removable flag.
+	js := `{"blockdevices":[{"name":"sdc","path":"/dev/sdc","model":"DataTraveler SE9","serial":"001",` +
+		`"size":"68719476736","tran":"usb","rm":true,"type":"disk","fstype":null,"label":null,"mountpoint":null,"children":[]}]}`
 	spy := runner.NewSpyRunner()
 	spy.StubResponse("lsblk --json --bytes --output NAME,PATH,MODEL,SERIAL,SIZE,TRAN,RM,TYPE,FSTYPE,LABEL,MOUNTPOINT",
 		&runner.Result{Stdout: js})
@@ -69,7 +71,24 @@ func TestListDisks_RemovableDiskFiltered(t *testing.T) {
 		t.Fatalf("ListDisks: %v", err)
 	}
 	if len(disks) != 0 {
-		t.Errorf("expected 0 disks (removable filtered), got %d", len(disks))
+		t.Errorf("expected 0 disks (usb filtered), got %d", len(disks))
+	}
+}
+
+func TestListDisks_RemovableFlagPreservedForDisplay(t *testing.T) {
+	js := buildSingleDiskJSON("/dev/sdc", 64*1024*1024*1024, "disk", true, nil)
+	spy := runner.NewSpyRunner()
+	spy.StubResponse("lsblk --json --bytes --output NAME,PATH,MODEL,SERIAL,SIZE,TRAN,RM,TYPE,FSTYPE,LABEL,MOUNTPOINT",
+		&runner.Result{Stdout: js})
+	disks, err := NewSystemProber(spy).ListDisks(context.Background())
+	if err != nil {
+		t.Fatalf("ListDisks: %v", err)
+	}
+	if len(disks) != 1 {
+		t.Fatalf("expected removable non-USB disk to be offered, got %d", len(disks))
+	}
+	if !disks[0].Removable {
+		t.Error("Removable should be reported so the TUI can label the disk")
 	}
 }
 

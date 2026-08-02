@@ -375,7 +375,7 @@ func (w *Wizard) runSystemChecks() {
 	} else {
 		w.State.SystemChecks = append(w.State.SystemChecks, SystemCheck{
 			Name: "Disk", Status: "fail",
-			Detail: "no eligible disks found (need ≥8GB, non-removable, non-boot)",
+			Detail: "no eligible disks found (need ≥8GB, not USB, not backing the running system)",
 		})
 	}
 

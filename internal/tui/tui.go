@@ -893,6 +893,11 @@ func (m *Model) viewStorage() string {
 		if disk.Removable {
 			transport += " (removable)"
 		}
+		// Flag occupied disks so an existing installation is visible while
+		// choosing, alongside the erase warning below the list.
+		if n := len(disk.Partitions); n > 0 {
+			transport += fmt.Sprintf(" · %s", pluralPartitions(n))
+		}
 		line2 := "    " + dimStyle.Render(path+"  "+transport)
 
 		if i == m.cursor {
@@ -907,6 +912,14 @@ func (m *Model) viewStorage() string {
 	b.WriteString(warnStyle.Render("⚠ All data on the selected disk will be erased!"))
 	b.WriteString("\n")
 	return b.String()
+}
+
+// pluralPartitions renders a partition count with the right noun.
+func pluralPartitions(n int) string {
+	if n == 1 {
+		return "1 partition"
+	}
+	return fmt.Sprintf("%d partitions", n)
 }
 
 func (m *Model) viewSysext() string {

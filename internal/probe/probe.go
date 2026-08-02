@@ -63,11 +63,16 @@ func (p *SystemProber) ListDisks(ctx context.Context) ([]model.DiskInfo, error) 
 	var disks []model.DiskInfo
 	for _, dev := range output.Blockdevices {
 		if dev.Type != "disk" {
+			slog.Debug("disk skipped", "device", dev.Path, "reason", "not a disk", "type", dev.Type)
 			continue
 		}
 
-		// Skip removable devices
-		if dev.RM {
+		// Skip the installer media itself. Transport is the reliable signal:
+		// the RM flag is not, because some kernels report internal SATA disks
+		// as removable (e.g. when the AHCI port is hotplug-capable), which
+		// would hide a legitimate install target.
+		if deref(dev.Tran) == "usb" {
+			slog.Debug("disk skipped", "device", dev.Path, "reason", "usb transport (installer media)")
 			continue
 		}
 
@@ -75,19 +80,15 @@ func (p *SystemProber) ListDisks(ctx context.Context) ([]model.DiskInfo, error) 
 
 		// Skip disks smaller than 8GB (flatcar-install minimum)
 		if uint64(size) < 8*1024*1024*1024 {
+			slog.Debug("disk skipped", "device", dev.Path, "reason", "smaller than 8 GiB", "size", size)
 			continue
 		}
 
-		// Skip the boot disk (has mounted partitions like / or /boot)
-		isBootDisk := false
-		for _, child := range dev.Children {
-			mp := deref(child.MountPoint)
-			if mp == "/" || mp == "/boot" || mp == "/usr" || mp == "/sysroot" {
-				isBootDisk = true
-				break
-			}
-		}
-		if isBootDisk {
+		// Skip disks backing the running system. A disk that merely holds an
+		// existing OS install is still a valid target — only mounted ones are
+		// excluded, since overwriting them would break the live environment.
+		if reason := inUseReason(dev); reason != "" {
+			slog.Debug("disk skipped", "device", dev.Path, "reason", reason)
 			continue
 		}
 
@@ -119,10 +120,42 @@ func (p *SystemProber) ListDisks(ctx context.Context) ([]model.DiskInfo, error) 
 			}
 		}
 
+		slog.Debug("disk eligible", "device", disk.DevPath, "size", disk.SizeHuman,
+			"transport", disk.Transport, "removable", disk.Removable, "partitions", len(disk.Partitions))
 		disks = append(disks, disk)
 	}
 
 	return disks, nil
+}
+
+// liveMountPoints are mountpoints that mean the device is backing the running
+// system. A device carrying any of them must never be an install target.
+var liveMountPoints = map[string]bool{
+	"/":        true,
+	"/boot":    true,
+	"/usr":     true,
+	"/sysroot": true,
+}
+
+// inUseReason reports why dev is unavailable as an install target, or "" if it
+// is available. It walks the whole device tree, so nested layouts (a mounted
+// filesystem inside LVM or LUKS) are caught, not just direct partitions.
+func inUseReason(dev lsblkDevice) string {
+	if mp := deref(dev.MountPoint); liveMountPoints[mp] {
+		return "mounted at " + mp + " (backs the running system)"
+	}
+	// The live ISO can be attached as something other than USB — IPMI virtual
+	// media, or a device the installer was dd'd onto. Its filesystem gives it
+	// away regardless of transport.
+	if deref(dev.FSType) == "iso9660" {
+		return "iso9660 filesystem (installer media)"
+	}
+	for _, child := range dev.Children {
+		if reason := inUseReason(child); reason != "" {
+			return reason
+		}
+	}
+	return ""
 }
 
 func (p *SystemProber) ListNetworkInterfaces(ctx context.Context) ([]model.NetworkInterface, error) {

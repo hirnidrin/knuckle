@@ -100,8 +100,21 @@ fi
 echo "=== Building knuckle installer ISO (channel: $CHANNEL, arch: $ARCH) ==="
 echo "  systemd-boot: $SDBOOT_EFI"
 
-# ── 1. Build knuckle binary (skipped when binary already present) ─────────────
+# ── 1. Build knuckle binary ───────────────────────────────────────────────────
+# Reused when it is present and up to date. Staleness matters here: the initrd
+# cache below is keyed on the binary's hash, so an out-of-date binary produces a
+# fully cached ISO that silently boots yesterday's installer. A binary pinned
+# with --binary is taken as-is (CI supplies a prebuilt artifact).
+BUILD_BINARY=0
 if [[ ! -f "$BINARY" ]]; then
+    BUILD_BINARY=1
+elif [[ -z "$BINARY_OVERRIDE" ]] &&
+     [[ -n "$(find "$ROOT_DIR/cmd" "$ROOT_DIR/internal" -name '*.go' -newer "$BINARY" -print -quit 2>/dev/null)" ]]; then
+    echo "  Go sources are newer than $BINARY — rebuilding"
+    BUILD_BINARY=1
+fi
+
+if (( BUILD_BINARY )); then
     echo "[1/5] Building knuckle..."
     VERSION="$(git -C "$ROOT_DIR" describe --tags --always 2>/dev/null || echo dev)"
     (cd "$ROOT_DIR" && GOOS=linux GOARCH="$ARCH" CGO_ENABLED=0 \
@@ -362,7 +375,15 @@ cp "$EFI_IMG" "$ISO_DIR/efi.img"
 mkdir -p "$OUTPUT_DIR"
 ISO_OUT="$OUTPUT_DIR/knuckle-installer-${CHANNEL}-${ARCH}.iso"
 
-xorriso -as mkisofs \
+# xorriso refuses to overwrite an output file it cannot write (e.g. one left
+# behind by a build under a different uid), so clear any previous ISO first.
+rm -f "$ISO_OUT"
+
+# xorriso's progress chatter goes to stderr, so it is captured rather than shown
+# — but it must not be discarded: a failure here (permissions, disk space)
+# reports only an exit code otherwise.
+XORRISO_LOG="$BUILD_DIR/xorriso.log"
+if ! xorriso -as mkisofs \
     -o "$ISO_OUT" \
     -R -J -joliet-long \
     -V "KNUCKLE_INSTALL" \
@@ -370,7 +391,11 @@ xorriso -as mkisofs \
     -e efi.img \
     -no-emul-boot \
     --efi-boot-part --efi-boot-image \
-    "$ISO_DIR" 2>/dev/null
+    "$ISO_DIR" 2>"$XORRISO_LOG"; then
+    echo "  xorriso failed — last lines of $XORRISO_LOG:" >&2
+    grep -E "FAILURE|FATAL|SORRY|MISHAP" "$XORRISO_LOG" | tail -10 >&2 || tail -10 "$XORRISO_LOG" >&2
+    exit 1
+fi
 
 echo ""
 echo "ISO built: $ISO_OUT ($(du -h "$ISO_OUT" | cut -f1))"

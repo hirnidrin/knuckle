@@ -122,11 +122,11 @@ func TestListDisksError(t *testing.T) {
 	}
 }
 
-func TestListDisksFiltersRemovableAndSmallDisks(t *testing.T) {
+func TestListDisksFiltersUSBAndSmallDisks(t *testing.T) {
 	spy := runner.NewSpyRunner()
 	spy.StubResponse("lsblk --json --bytes --output NAME,PATH,MODEL,SERIAL,SIZE,TRAN,RM,TYPE,FSTYPE,LABEL,MOUNTPOINT", &runner.Result{
 		Stdout: `{"blockdevices":[
-			{"name":"sdb","path":"/dev/sdb","size":17179869184,"rm":true,"type":"disk"},
+			{"name":"sdb","path":"/dev/sdb","size":17179869184,"tran":"usb","rm":true,"type":"disk"},
 			{"name":"sdc","path":"/dev/sdc","size":4294967296,"rm":false,"type":"disk"},
 			{"name":"sdd","path":"/dev/sdd","model":"Test Disk","serial":"disk-123","size":34359738368,"tran":"sata","rm":false,"type":"disk"}
 		]}`,
@@ -153,6 +153,77 @@ func TestListDisksFiltersRemovableAndSmallDisks(t *testing.T) {
 	}
 	if disk.Size != 34359738368 {
 		t.Errorf("valid disk Size = %d, want %d", disk.Size, uint64(34359738368))
+	}
+}
+
+// Regression: Flatcar's 6.6 kernel reports the internal SATA SSD on a
+// Supermicro M11SDV as removable, which used to hide it from the target list.
+// A removable-flagged, non-USB disk holding an existing OS must be offered.
+func TestListDisksKeepsRemovableFlaggedSATADisk(t *testing.T) {
+	spy := runner.NewSpyRunner()
+	spy.StubResponse("lsblk --json --bytes --output NAME,PATH,MODEL,SERIAL,SIZE,TRAN,RM,TYPE,FSTYPE,LABEL,MOUNTPOINT", &runner.Result{
+		Stdout: `{"blockdevices":[
+			{"name":"sda","path":"/dev/sda","model":"Crucial_CT240M50","size":240057409536,"tran":"sata","rm":true,"type":"disk","children":[
+				{"name":"sda3","path":"/dev/sda3","size":402653184,"rm":true,"type":"part","fstype":"ext4","label":"boot","mountpoint":null},
+				{"name":"sda4","path":"/dev/sda4","size":239527559168,"rm":true,"type":"part","fstype":"xfs","label":"root","mountpoint":null}
+			]}
+		]}`,
+	})
+
+	disks, err := NewSystemProber(spy).ListDisks(context.Background())
+	if err != nil {
+		t.Fatalf("ListDisks() error: %v", err)
+	}
+	if len(disks) != 1 {
+		t.Fatalf("expected removable-flagged SATA disk to be offered, got %d disks: %#v", len(disks), disks)
+	}
+	if !disks[0].Removable {
+		t.Error("disk should still be reported as removable for display")
+	}
+	if len(disks[0].Partitions) != 2 {
+		t.Errorf("partitions: got %d, want 2", len(disks[0].Partitions))
+	}
+}
+
+func TestListDisksFiltersNestedMountedDisk(t *testing.T) {
+	// Root mounted one level down (LVM/LUKS layout) — the parent disk backs
+	// the running system and must not be offered.
+	spy := runner.NewSpyRunner()
+	spy.StubResponse("lsblk --json --bytes --output NAME,PATH,MODEL,SERIAL,SIZE,TRAN,RM,TYPE,FSTYPE,LABEL,MOUNTPOINT", &runner.Result{
+		Stdout: `{"blockdevices":[
+			{"name":"sda","path":"/dev/sda","size":240057409536,"tran":"sata","rm":false,"type":"disk","children":[
+				{"name":"sda1","path":"/dev/sda1","size":239527559168,"rm":false,"type":"part","fstype":"LVM2_member","children":[
+					{"name":"vg-root","path":"/dev/mapper/vg-root","size":239527559168,"rm":false,"type":"lvm","fstype":"xfs","mountpoint":"/"}
+				]}
+			]}
+		]}`,
+	})
+
+	disks, err := NewSystemProber(spy).ListDisks(context.Background())
+	if err != nil {
+		t.Fatalf("ListDisks() error: %v", err)
+	}
+	if len(disks) != 0 {
+		t.Fatalf("expected nested mounted disk to be filtered, got %d disks: %#v", len(disks), disks)
+	}
+}
+
+func TestListDisksFiltersISO9660Media(t *testing.T) {
+	// Installer media attached as IPMI virtual media: not USB transport, but
+	// the iso9660 filesystem identifies it.
+	spy := runner.NewSpyRunner()
+	spy.StubResponse("lsblk --json --bytes --output NAME,PATH,MODEL,SERIAL,SIZE,TRAN,RM,TYPE,FSTYPE,LABEL,MOUNTPOINT", &runner.Result{
+		Stdout: `{"blockdevices":[
+			{"name":"sdx","path":"/dev/sdx","size":17179869184,"tran":"sata","rm":false,"type":"disk","fstype":"iso9660","label":"KNUCKLE"}
+		]}`,
+	})
+
+	disks, err := NewSystemProber(spy).ListDisks(context.Background())
+	if err != nil {
+		t.Fatalf("ListDisks() error: %v", err)
+	}
+	if len(disks) != 0 {
+		t.Fatalf("expected iso9660 media to be filtered, got %d disks: %#v", len(disks), disks)
 	}
 }
 
