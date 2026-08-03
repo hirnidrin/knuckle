@@ -1,14 +1,11 @@
 name: Security
 
+# FORK: automatic triggers disabled — this fork runs no CI except ci.yml.
+# Upstream triggers were: push to [main], pull_request to [main, 'feat/**'], and
+# schedule cron "37 6 * * 1" (weekly CodeQL + Scorecard refresh, to catch advisories
+# filed against pinned dependencies even when the repo is quiet).
 on:
-  push:
-    branches: [main]
-  pull_request:
-    branches: [main, 'feat/**']
-  schedule:
-    # Refresh CodeQL + Scorecard weekly so we catch advisories filed
-    # against pinned dependencies even when the repo is quiet.
-    - cron: "37 6 * * 1"
+  workflow_dispatch:
 
 permissions:
   contents: read

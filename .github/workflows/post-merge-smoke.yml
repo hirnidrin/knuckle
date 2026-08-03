@@ -1,8 +1,8 @@
 name: Post-merge BATS smoke
 
+# FORK: push trigger disabled — this fork runs no CI except ci.yml.
+# Upstream also ran on push to [main]. Manual dispatch is kept.
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
 
 permissions:
