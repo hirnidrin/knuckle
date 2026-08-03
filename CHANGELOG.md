@@ -14,13 +14,16 @@ file is the curated, human-readable history.
   holding an existing installation is visible before it is selected.
 
 ### Fixed
-- Disk discovery no longer hides internal disks that the kernel flags as
-  removable. Flatcar's 6.6 kernel reports some SATA SSDs as removable (seen on
-  a Supermicro M11SDV with a Crucial M500), which excluded a valid install
-  target; the installer's own media is now identified by USB transport or an
-  iso9660 filesystem instead. Disks holding an existing OS install remain
-  selectable — only devices backing the running system are excluded, now
-  detected through nested layouts (LVM/LUKS) as well as direct partitions.
+- Disk discovery no longer hides disks by transport or by the kernel's
+  removable flag. Flatcar's 6.6 kernel reports some SATA SSDs as removable
+  (seen on a Supermicro M11SDV with a Crucial M500), and USB-attached drives
+  are legitimate targets, so every disk of at least 8 GB is now offered. The
+  exclusions are the installer's own medium — identified by the PARTUUID
+  systemd-boot records for the ESP it booted from, or by an iso9660 filesystem
+  where no EFI record exists (BIOS/CSM, IPMI virtual media) — and devices
+  backing the running system, detected through nested layouts (LVM/LUKS) as
+  well as direct partitions. Disks holding an existing OS install remain
+  selectable.
 
 ### Internal
 - Skipped disks are logged with a reason, and package-level `slog` output is

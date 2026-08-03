@@ -2,11 +2,14 @@ package probe
 
 import (
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
+	"unicode/utf16"
 
 	"github.com/NVIDIA/go-nvlib/pkg/nvpci"
 
@@ -29,7 +32,7 @@ func NewSystemProber(r runner.Runner) *SystemProber {
 	return &SystemProber{Runner: r}
 }
 
-// lsblkOutput matches the JSON output of `lsblk --json --bytes --output NAME,PATH,MODEL,SERIAL,SIZE,TRAN,RM,TYPE,FSTYPE,LABEL,MOUNTPOINT`
+// lsblkOutput matches the JSON output of `lsblk --json --bytes --output NAME,PATH,MODEL,SERIAL,SIZE,TRAN,RM,TYPE,FSTYPE,LABEL,PARTUUID,MOUNTPOINT`
 type lsblkOutput struct {
 	Blockdevices []lsblkDevice `json:"blockdevices"`
 }
@@ -45,12 +48,13 @@ type lsblkDevice struct {
 	Type       string        `json:"type"`
 	FSType     *string       `json:"fstype"`
 	Label      *string       `json:"label"`
+	PartUUID   *string       `json:"partuuid"`
 	MountPoint *string       `json:"mountpoint"`
 	Children   []lsblkDevice `json:"children,omitempty"`
 }
 
 func (p *SystemProber) ListDisks(ctx context.Context) ([]model.DiskInfo, error) {
-	result, err := p.Runner.Run(ctx, "lsblk", "--json", "--bytes", "--output", "NAME,PATH,MODEL,SERIAL,SIZE,TRAN,RM,TYPE,FSTYPE,LABEL,MOUNTPOINT")
+	result, err := p.Runner.Run(ctx, "lsblk", "--json", "--bytes", "--output", "NAME,PATH,MODEL,SERIAL,SIZE,TRAN,RM,TYPE,FSTYPE,LABEL,PARTUUID,MOUNTPOINT")
 	if err != nil {
 		return nil, fmt.Errorf("lsblk: %w", err)
 	}
@@ -60,19 +64,14 @@ func (p *SystemProber) ListDisks(ctx context.Context) ([]model.DiskInfo, error) 
 		return nil, fmt.Errorf("parsing lsblk output: %w", err)
 	}
 
+	// Identify the medium the installer booted from, so it can be excluded
+	// below. Resolved once per listing rather than per device.
+	bootUUID := bootPartUUID()
+
 	var disks []model.DiskInfo
 	for _, dev := range output.Blockdevices {
 		if dev.Type != "disk" {
 			slog.Debug("disk skipped", "device", dev.Path, "reason", "not a disk", "type", dev.Type)
-			continue
-		}
-
-		// Skip the installer media itself. Transport is the reliable signal:
-		// the RM flag is not, because some kernels report internal SATA disks
-		// as removable (e.g. when the AHCI port is hotplug-capable), which
-		// would hide a legitimate install target.
-		if deref(dev.Tran) == "usb" {
-			slog.Debug("disk skipped", "device", dev.Path, "reason", "usb transport (installer media)")
 			continue
 		}
 
@@ -84,10 +83,14 @@ func (p *SystemProber) ListDisks(ctx context.Context) ([]model.DiskInfo, error) 
 			continue
 		}
 
-		// Skip disks backing the running system. A disk that merely holds an
-		// existing OS install is still a valid target — only mounted ones are
-		// excluded, since overwriting them would break the live environment.
-		if reason := inUseReason(dev); reason != "" {
+		// Skip the installer's own medium and disks backing the running system.
+		// Transport is deliberately not a criterion: a large USB disk is a
+		// legitimate target, and the RM flag is not trustworthy either, since
+		// some kernels report internal SATA disks as removable (e.g. when the
+		// AHCI port is hotplug-capable). A disk that merely holds an existing
+		// OS install stays selectable — only mounted ones are excluded, since
+		// overwriting them would break the live environment.
+		if reason := inUseReason(dev, bootUUID); reason != "" {
 			slog.Debug("disk skipped", "device", dev.Path, "reason", reason)
 			continue
 		}
@@ -138,24 +141,73 @@ var liveMountPoints = map[string]bool{
 }
 
 // inUseReason reports why dev is unavailable as an install target, or "" if it
-// is available. It walks the whole device tree, so nested layouts (a mounted
-// filesystem inside LVM or LUKS) are caught, not just direct partitions.
-func inUseReason(dev lsblkDevice) string {
+// is available. bootUUID is the PARTUUID of the ESP the installer booted from,
+// or "" when it could not be determined. It walks the whole device tree, so
+// nested layouts (a mounted filesystem inside LVM or LUKS) are caught, not just
+// direct partitions.
+func inUseReason(dev lsblkDevice, bootUUID string) string {
 	if mp := deref(dev.MountPoint); liveMountPoints[mp] {
 		return "mounted at " + mp + " (backs the running system)"
 	}
-	// The live ISO can be attached as something other than USB — IPMI virtual
-	// media, or a device the installer was dd'd onto. Its filesystem gives it
-	// away regardless of transport.
+	// The medium knuckle booted from, identified exactly: systemd-boot records
+	// the PARTUUID of the ESP it was launched from. Catches installer media of
+	// any shape — dd'd stick, IPMI virtual media, a file-copied USB drive.
+	if bootUUID != "" && strings.EqualFold(deref(dev.PartUUID), bootUUID) {
+		return "holds the ESP the installer booted from"
+	}
+	// Fallback for boot paths that leave no EFI record (BIOS/CSM, or efivars
+	// unreadable): a dd'd hybrid ISO is identifiable by its filesystem.
 	if deref(dev.FSType) == "iso9660" {
 		return "iso9660 filesystem (installer media)"
 	}
 	for _, child := range dev.Children {
-		if reason := inUseReason(child); reason != "" {
+		if reason := inUseReason(child, bootUUID); reason != "" {
 			return reason
 		}
 	}
 	return ""
+}
+
+// loaderDevicePartUUIDVar is the efivarfs path of systemd-boot's
+// LoaderDevicePartUUID variable, which holds the PARTUUID of the ESP the
+// bootloader was launched from — i.e. the installer medium. The GUID suffix is
+// systemd's vendor GUID and is stable.
+const loaderDevicePartUUIDVar = "/sys/firmware/efi/efivars/LoaderDevicePartUUID-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f"
+
+// bootPartUUID returns the PARTUUID of the partition the installer booted from,
+// lowercased, or "" when it cannot be determined (BIOS boot, no efivarfs, or a
+// bootloader that does not set the variable). A var so tests can supply one.
+var bootPartUUID = func() string {
+	return bootPartUUIDFrom(loaderDevicePartUUIDVar)
+}
+
+// bootPartUUIDFrom is the testable core of bootPartUUID. The efivarfs payload
+// is 4 bytes of EFI variable attributes followed by a NUL-terminated UTF-16LE
+// string.
+func bootPartUUIDFrom(path string) string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		slog.Debug("boot medium unknown: EFI loader variable unreadable",
+			"path", path, "error", err)
+		return ""
+	}
+	const attrLen = 4
+	if len(data) < attrLen+2 {
+		slog.Debug("boot medium unknown: EFI loader variable too short",
+			"path", path, "bytes", len(data))
+		return ""
+	}
+	units := make([]uint16, 0, (len(data)-attrLen)/2)
+	for i := attrLen; i+1 < len(data); i += 2 {
+		u := binary.LittleEndian.Uint16(data[i:])
+		if u == 0 {
+			break
+		}
+		units = append(units, u)
+	}
+	uuid := strings.ToLower(strings.TrimSpace(string(utf16.Decode(units))))
+	slog.Debug("boot medium identified", "partuuid", uuid)
+	return uuid
 }
 
 func (p *SystemProber) ListNetworkInterfaces(ctx context.Context) ([]model.NetworkInterface, error) {

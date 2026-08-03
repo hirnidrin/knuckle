@@ -17,7 +17,7 @@ func BenchmarkListDisks(b *testing.B) {
 	}
 
 	spy := runner.NewSpyRunner()
-	spy.StubResponse("lsblk --json --bytes --output NAME,PATH,MODEL,SERIAL,SIZE,TRAN,RM,TYPE,FSTYPE,LABEL,MOUNTPOINT", &runner.Result{
+	spy.StubResponse("lsblk --json --bytes --output NAME,PATH,MODEL,SERIAL,SIZE,TRAN,RM,TYPE,FSTYPE,LABEL,PARTUUID,MOUNTPOINT", &runner.Result{
 		Stdout: string(fixture),
 	})
 

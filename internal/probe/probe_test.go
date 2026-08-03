@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"testing"
+	"unicode/utf16"
 
 	"github.com/NVIDIA/go-nvlib/pkg/nvpci"
 
@@ -23,7 +24,7 @@ func TestListDisks(t *testing.T) {
 	}
 
 	spy := runner.NewSpyRunner()
-	spy.StubResponse("lsblk --json --bytes --output NAME,PATH,MODEL,SERIAL,SIZE,TRAN,RM,TYPE,FSTYPE,LABEL,MOUNTPOINT", &runner.Result{
+	spy.StubResponse("lsblk --json --bytes --output NAME,PATH,MODEL,SERIAL,SIZE,TRAN,RM,TYPE,FSTYPE,LABEL,PARTUUID,MOUNTPOINT", &runner.Result{
 		Stdout: string(fixture),
 	})
 
@@ -110,7 +111,7 @@ func TestListNetworkInterfaces(t *testing.T) {
 
 func TestListDisksError(t *testing.T) {
 	spy := runner.NewSpyRunner()
-	spy.StubError("lsblk --json --bytes --output NAME,PATH,MODEL,SERIAL,SIZE,TRAN,RM,TYPE,FSTYPE,LABEL,MOUNTPOINT", errors.New("command not found"))
+	spy.StubError("lsblk --json --bytes --output NAME,PATH,MODEL,SERIAL,SIZE,TRAN,RM,TYPE,FSTYPE,LABEL,PARTUUID,MOUNTPOINT", errors.New("command not found"))
 
 	prober := NewSystemProber(spy)
 	_, err := prober.ListDisks(context.Background())
@@ -122,11 +123,11 @@ func TestListDisksError(t *testing.T) {
 	}
 }
 
-func TestListDisksFiltersUSBAndSmallDisks(t *testing.T) {
+func TestListDisksFiltersSmallDisksAndKeepsUSB(t *testing.T) {
 	spy := runner.NewSpyRunner()
-	spy.StubResponse("lsblk --json --bytes --output NAME,PATH,MODEL,SERIAL,SIZE,TRAN,RM,TYPE,FSTYPE,LABEL,MOUNTPOINT", &runner.Result{
+	spy.StubResponse("lsblk --json --bytes --output NAME,PATH,MODEL,SERIAL,SIZE,TRAN,RM,TYPE,FSTYPE,LABEL,PARTUUID,MOUNTPOINT", &runner.Result{
 		Stdout: `{"blockdevices":[
-			{"name":"sdb","path":"/dev/sdb","size":17179869184,"tran":"usb","rm":true,"type":"disk"},
+			{"name":"sdb","path":"/dev/sdb","model":"Big Stick","size":274877906944,"tran":"usb","rm":true,"type":"disk"},
 			{"name":"sdc","path":"/dev/sdc","size":4294967296,"rm":false,"type":"disk"},
 			{"name":"sdd","path":"/dev/sdd","model":"Test Disk","serial":"disk-123","size":34359738368,"tran":"sata","rm":false,"type":"disk"}
 		]}`,
@@ -137,11 +138,15 @@ func TestListDisksFiltersUSBAndSmallDisks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListDisks() error: %v", err)
 	}
-	if len(disks) != 1 {
-		t.Fatalf("expected only valid disk to remain, got %d disks: %#v", len(disks), disks)
+	// The 256 GB USB drive is a legitimate target; only the 4 GB disk is too small.
+	if len(disks) != 2 {
+		t.Fatalf("expected the USB and SATA disks to remain, got %d disks: %#v", len(disks), disks)
+	}
+	if disks[0].DevPath != "/dev/sdb" || disks[0].Transport != "usb" {
+		t.Errorf("first disk = %q (%s), want /dev/sdb (usb)", disks[0].DevPath, disks[0].Transport)
 	}
 
-	disk := disks[0]
+	disk := disks[1]
 	if disk.DevPath != "/dev/sdd" {
 		t.Fatalf("valid disk DevPath = %q, want /dev/sdd", disk.DevPath)
 	}
@@ -161,7 +166,7 @@ func TestListDisksFiltersUSBAndSmallDisks(t *testing.T) {
 // A removable-flagged, non-USB disk holding an existing OS must be offered.
 func TestListDisksKeepsRemovableFlaggedSATADisk(t *testing.T) {
 	spy := runner.NewSpyRunner()
-	spy.StubResponse("lsblk --json --bytes --output NAME,PATH,MODEL,SERIAL,SIZE,TRAN,RM,TYPE,FSTYPE,LABEL,MOUNTPOINT", &runner.Result{
+	spy.StubResponse("lsblk --json --bytes --output NAME,PATH,MODEL,SERIAL,SIZE,TRAN,RM,TYPE,FSTYPE,LABEL,PARTUUID,MOUNTPOINT", &runner.Result{
 		Stdout: `{"blockdevices":[
 			{"name":"sda","path":"/dev/sda","model":"Crucial_CT240M50","size":240057409536,"tran":"sata","rm":true,"type":"disk","children":[
 				{"name":"sda3","path":"/dev/sda3","size":402653184,"rm":true,"type":"part","fstype":"ext4","label":"boot","mountpoint":null},
@@ -189,7 +194,7 @@ func TestListDisksFiltersNestedMountedDisk(t *testing.T) {
 	// Root mounted one level down (LVM/LUKS layout) — the parent disk backs
 	// the running system and must not be offered.
 	spy := runner.NewSpyRunner()
-	spy.StubResponse("lsblk --json --bytes --output NAME,PATH,MODEL,SERIAL,SIZE,TRAN,RM,TYPE,FSTYPE,LABEL,MOUNTPOINT", &runner.Result{
+	spy.StubResponse("lsblk --json --bytes --output NAME,PATH,MODEL,SERIAL,SIZE,TRAN,RM,TYPE,FSTYPE,LABEL,PARTUUID,MOUNTPOINT", &runner.Result{
 		Stdout: `{"blockdevices":[
 			{"name":"sda","path":"/dev/sda","size":240057409536,"tran":"sata","rm":false,"type":"disk","children":[
 				{"name":"sda1","path":"/dev/sda1","size":239527559168,"rm":false,"type":"part","fstype":"LVM2_member","children":[
@@ -209,10 +214,10 @@ func TestListDisksFiltersNestedMountedDisk(t *testing.T) {
 }
 
 func TestListDisksFiltersISO9660Media(t *testing.T) {
-	// Installer media attached as IPMI virtual media: not USB transport, but
-	// the iso9660 filesystem identifies it.
+	// Installer media on a boot path that leaves no EFI loader record (BIOS/CSM,
+	// or IPMI virtual media): the iso9660 filesystem identifies it.
 	spy := runner.NewSpyRunner()
-	spy.StubResponse("lsblk --json --bytes --output NAME,PATH,MODEL,SERIAL,SIZE,TRAN,RM,TYPE,FSTYPE,LABEL,MOUNTPOINT", &runner.Result{
+	spy.StubResponse("lsblk --json --bytes --output NAME,PATH,MODEL,SERIAL,SIZE,TRAN,RM,TYPE,FSTYPE,LABEL,PARTUUID,MOUNTPOINT", &runner.Result{
 		Stdout: `{"blockdevices":[
 			{"name":"sdx","path":"/dev/sdx","size":17179869184,"tran":"sata","rm":false,"type":"disk","fstype":"iso9660","label":"KNUCKLE"}
 		]}`,
@@ -224,6 +229,89 @@ func TestListDisksFiltersISO9660Media(t *testing.T) {
 	}
 	if len(disks) != 0 {
 		t.Fatalf("expected iso9660 media to be filtered, got %d disks: %#v", len(disks), disks)
+	}
+}
+
+// The medium knuckle booted from must never be offered, whatever its transport,
+// while a second USB drive of the same shape stays selectable.
+func TestListDisksFiltersBootMediumByPartUUID(t *testing.T) {
+	prev := bootPartUUID
+	t.Cleanup(func() { bootPartUUID = prev })
+	bootPartUUID = func() string { return "3f8a1c22-0000-4a1b-9e11-11a0d0c0ffee" }
+
+	spy := runner.NewSpyRunner()
+	spy.StubResponse("lsblk --json --bytes --output NAME,PATH,MODEL,SERIAL,SIZE,TRAN,RM,TYPE,FSTYPE,LABEL,PARTUUID,MOUNTPOINT", &runner.Result{
+		Stdout: `{"blockdevices":[
+			{"name":"sda","path":"/dev/sda","model":"Installer Stick","size":34359738368,"tran":"usb","rm":true,"type":"disk","children":[
+				{"name":"sda1","path":"/dev/sda1","size":536870912,"rm":true,"type":"part","fstype":"vfat","partuuid":"3F8A1C22-0000-4A1B-9E11-11A0D0C0FFEE"}
+			]},
+			{"name":"sdb","path":"/dev/sdb","model":"Target Stick","size":274877906944,"tran":"usb","rm":true,"type":"disk","children":[
+				{"name":"sdb1","path":"/dev/sdb1","size":274341036032,"rm":true,"type":"part","fstype":"ext4","partuuid":"aaaaaaaa-1111-2222-3333-444444444444"}
+			]}
+		]}`,
+	})
+
+	disks, err := NewSystemProber(spy).ListDisks(context.Background())
+	if err != nil {
+		t.Fatalf("ListDisks() error: %v", err)
+	}
+	if len(disks) != 1 {
+		t.Fatalf("expected only the non-boot USB drive, got %d disks: %#v", len(disks), disks)
+	}
+	if disks[0].DevPath != "/dev/sdb" {
+		t.Errorf("offered disk = %q, want /dev/sdb", disks[0].DevPath)
+	}
+}
+
+func TestBootPartUUIDFrom(t *testing.T) {
+	// efivarfs payload: 4 attribute bytes + NUL-terminated UTF-16LE string.
+	efivar := func(t *testing.T, body []byte) string {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "LoaderDevicePartUUID")
+		if err := os.WriteFile(path, body, 0o600); err != nil {
+			t.Fatalf("writing efivar fixture: %v", err)
+		}
+		return path
+	}
+	utf16le := func(s string, terminated bool) []byte {
+		body := []byte{0x07, 0x00, 0x00, 0x00} // NV | BS | RT attributes
+		for _, u := range utf16.Encode([]rune(s)) {
+			body = append(body, byte(u), byte(u>>8))
+		}
+		if terminated {
+			body = append(body, 0x00, 0x00)
+		}
+		return body
+	}
+
+	const uuid = "3F8A1C22-0000-4A1B-9E11-11A0D0C0FFEE"
+	tests := []struct {
+		name string
+		path string
+		want string
+	}{
+		{"nul terminated", efivar(t, utf16le(uuid, true)), "3f8a1c22-0000-4a1b-9e11-11a0d0c0ffee"},
+		{"unterminated", efivar(t, utf16le(uuid, false)), "3f8a1c22-0000-4a1b-9e11-11a0d0c0ffee"},
+		{"attributes only", efivar(t, []byte{0x07, 0x00, 0x00, 0x00}), ""},
+		{"missing", filepath.Join(t.TempDir(), "absent"), ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := bootPartUUIDFrom(tt.path); got != tt.want {
+				t.Errorf("bootPartUUIDFrom() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// On a real UEFI boot the variable is absent in CI; the helper must degrade to
+// "" rather than misidentify a disk.
+func TestBootPartUUIDNoEfivarfs(t *testing.T) {
+	if _, err := os.Stat(loaderDevicePartUUIDVar); err == nil {
+		t.Skip("host exposes a systemd-boot loader variable")
+	}
+	if got := bootPartUUID(); got != "" {
+		t.Errorf("bootPartUUID() = %q, want empty", got)
 	}
 }
 
