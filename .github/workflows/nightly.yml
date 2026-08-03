@@ -1,10 +1,10 @@
 name: Nightly Tests
 
+# FORK: scheduled trigger disabled — this fork runs no CI except ci.yml.
+# Upstream also ran on schedule cron "0 3 * * *" (daily 03:00 UTC, to catch
+# regressions from dep updates). Manual dispatch is kept.
 on:
-  schedule:
-    # Run daily at 03:00 UTC to catch regressions from dep updates
-    - cron: "0 3 * * *"
-  workflow_dispatch: # allow manual triggers for debugging
+  workflow_dispatch:
 
 permissions:
   contents: read

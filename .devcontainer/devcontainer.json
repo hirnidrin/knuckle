@@ -1,0 +1,31 @@
+{
+	"name": "knuckle",
+	"build": {
+		"dockerfile": "Dockerfile"
+	},
+	"features": {
+		"ghcr.io/devcontainers/features/node:1": {},
+		"ghcr.io/anthropics/devcontainer-features/claude-code:1.0": {}
+	},
+	"remoteUser": "vscode",
+	"postCreateCommand": "go mod download && just tools",
+	"customizations": {
+		"vscode": {
+			"extensions": [
+				"golang.go",
+				"nefrob.vscode-just-syntax",
+				"timonwong.shellcheck",
+				"editorconfig.editorconfig"
+			],
+			"settings": {
+				"go.toolsManagement.checkForUpdates": "local",
+				"go.useLanguageServer": true,
+				"go.lintTool": "golangci-lint"
+			}
+		}
+	},
+	"mounts": [
+		"source=knuckle-gomodcache,target=/home/vscode/go/pkg/mod,type=volume",
+		"source=${localEnv:HOME}/.claude,target=/home/vscode/.claude,type=bind"
+	]
+}

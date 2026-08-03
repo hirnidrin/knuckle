@@ -1,5 +1,8 @@
 name: VM E2E
 
+# FORK: push trigger disabled — this fork runs no CI except ci.yml.
+# Upstream also ran on push to [main] for paths: internal/**, cmd/**, scripts/**,
+# go.mod, go.sum. Manual dispatch is kept.
 on:
   workflow_dispatch:
     inputs:
@@ -9,14 +12,6 @@ on:
         default: 'amd64'
         type: choice
         options: ['amd64']
-  push:
-    branches: [main]
-    paths:
-      - 'internal/**'
-      - 'cmd/**'
-      - 'scripts/**'
-      - 'go.mod'
-      - 'go.sum'
 
 permissions:
   contents: read

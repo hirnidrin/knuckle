@@ -1,8 +1,10 @@
 name: Release
 
+# FORK: tag trigger disabled — this fork publishes no releases.
+# Upstream ran on push of tags ["v*"]. Manual dispatch only, so pushing an
+# upstream version tag into this fork cannot kick off a release.
 on:
-  push:
-    tags: ["v*"]
+  workflow_dispatch:
 
 permissions:
   contents: write

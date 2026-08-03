@@ -1,12 +1,10 @@
 name: bonedigger
 
+# FORK: automatic triggers disabled — this fork runs no CI except ci.yml.
+# Upstream triggers were: issues [opened, labeled, closed], issue_comment [created],
+# schedule cron '0 9 * * *'. Restore them if this fork ever needs issue lifecycle automation.
 on:
-  issues:
-    types: [opened, labeled, closed]
-  issue_comment:
-    types: [created]
-  schedule:
-    - cron: '0 9 * * *'
+  workflow_dispatch:
 
 permissions:
   issues: write
