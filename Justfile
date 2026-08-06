@@ -1196,7 +1196,7 @@ _install-shellcheck:
     #!/usr/bin/env bash
     set -euo pipefail
     if [[ -x "{{SHELLCHECK}}" ]]; then
-        ver=$("{{SHELLCHECK}}" --version 2>&1 | grep -oP 'version \K[0-9.]+' || true)
+        ver=$("{{SHELLCHECK}}" --version 2>&1 | grep -oP '^version:\s*\K[0-9.]+' || true)
         [[ "$ver" == "{{SHELLCHECK_VERSION}}" ]] && exit 0
         echo "shellcheck version mismatch (got $ver, want {{SHELLCHECK_VERSION}}) — reinstalling"
     fi
