@@ -240,8 +240,10 @@ func TestReviewSummary_AllFields(t *testing.T) {
 		Network:  model.NetworkConfig{Mode: model.NetworkStatic, Address: "10.0.0.5/24", Gateway: "10.0.0.1"},
 		Users:    []model.UserConfig{{Username: "admin"}},
 		SSHKeys:  []string{"ssh-ed25519 AAAA..."},
-		Sysexts:  []model.SysextEntry{{Name: "docker"}, {Name: "tailscale"}},
-		Swap:     model.SwapConfig{Enabled: true, SizeMB: 2048},
+		// Selected matters: Config.Sysexts carries the whole catalog, and the
+		// summary lists only what will actually be installed.
+		Sysexts: []model.SysextEntry{{Name: "docker", Selected: true}, {Name: "tailscale", Selected: true}},
+		Swap:    model.SwapConfig{Enabled: true, SizeMB: 2048},
 		Tailscale: model.TailscaleConfig{
 			AuthKey: "tskey-auth-xxx",
 			Mode:    model.TailscaleModeSubnetRouter,

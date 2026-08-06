@@ -2,6 +2,7 @@ package wizard
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	"golang.org/x/crypto/bcrypt"
@@ -115,6 +116,43 @@ func (w *Wizard) ApplyGitHubKeys(githubKeys []string, localKeys []string, manual
 	if len(cfg.Users) > 0 {
 		cfg.Users[0].SSHKeys = merged
 	}
+}
+
+// ApplySysexts installs a freshly fetched catalog as the current one, carrying
+// the user's selections across by name so a mid-wizard refresh does not clear
+// the checkboxes. It returns the names of previously selected extensions that
+// are no longer in the catalog (sorted), so the caller can say so rather than
+// dropping them silently.
+//
+// Config.Sysexts is re-pointed at the new slice: State.Sysexts and
+// Config.Sysexts must alias the same backing array, or the review screen and
+// generated Butane render pre-refresh data.
+func (w *Wizard) ApplySysexts(entries []model.SysextEntry) []string {
+	selected := make(map[string]bool)
+	for _, e := range w.State.Sysexts {
+		if e.Selected {
+			selected[e.Name] = true
+		}
+	}
+
+	for i := range entries {
+		if selected[entries[i].Name] {
+			entries[i].Selected = true
+			delete(selected, entries[i].Name)
+		}
+	}
+
+	w.State.Sysexts = entries
+	w.State.Config.Sysexts = entries
+	w.State.SysextErr = nil
+	w.autoSelectNvidia()
+
+	dropped := make([]string, 0, len(selected))
+	for name := range selected {
+		dropped = append(dropped, name)
+	}
+	sort.Strings(dropped)
+	return dropped
 }
 
 // HasAnyAuthentication reports whether the current Config has at least one

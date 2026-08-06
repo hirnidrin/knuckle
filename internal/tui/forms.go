@@ -290,11 +290,16 @@ func (m *Model) reviewSummary() string {
 	if len(cfg.SSHKeys) > 0 {
 		fmt.Fprintf(&b, "\n  SSH Keys: %d key(s)", len(cfg.SSHKeys))
 	}
-	if len(cfg.Sysexts) > 0 {
-		names := make([]string, len(cfg.Sysexts))
-		for i, s := range cfg.Sysexts {
-			names[i] = s.Name
+	// Config.Sysexts mirrors the whole catalog with Selected flags (same slice
+	// as State.Sysexts), so the summary must filter — as the Butane/Ignition
+	// side already does.
+	names := make([]string, 0, len(cfg.Sysexts))
+	for _, s := range cfg.Sysexts {
+		if s.Selected {
+			names = append(names, s.Name)
 		}
+	}
+	if len(names) > 0 {
 		fmt.Fprintf(&b, "\n  Sysexts: %s", strings.Join(names, ", "))
 	}
 	if cfg.Swap.Enabled {

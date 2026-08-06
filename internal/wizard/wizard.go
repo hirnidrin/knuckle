@@ -44,6 +44,11 @@ type State struct {
 	Interfaces []model.NetworkInterface
 	Sysexts    []model.SysextEntry
 
+	// SysextErr holds the last sysext catalog fetch failure, so the Sysext step
+	// can tell the user *why* the list is empty (rate limit, no network, …) and
+	// offer a retry. Nil once a fetch succeeds.
+	SysextErr error
+
 	// NvidiaGPUDetected is true when an NVIDIA GPU was found on the installer host.
 	// Since knuckle installs to the machine it runs on, detected GPUs will be present
 	// on the installed system too — used to auto-select the nvidia-runtime sysext.
@@ -428,24 +433,29 @@ func (w *Wizard) FetchSysexts(ctx context.Context) error {
 	}
 	sysexts, err := w.Bakery.FetchCatalogArch(ctx, w.State.Config.Arch)
 	if err != nil {
+		// Retained so the Sysext step can explain the empty list and offer a retry.
+		w.State.SysextErr = err
 		return fmt.Errorf("fetching sysext catalog: %w", err)
 	}
-	w.State.Sysexts = sysexts
+	w.ApplySysexts(sysexts)
+	return nil
+}
 
-	// Auto-select nvidia-runtime when a GPU is detected on the installer host.
-	if w.State.NvidiaGPUDetected {
-		for i, s := range w.State.Sysexts {
-			if s.Name == "nvidia-runtime" {
-				w.State.Sysexts[i].Selected = true
-				w.State.Config.Sysexts = w.State.Sysexts
-				if w.State.Config.NvidiaDriverVersion == "" {
-					w.State.Config.NvidiaDriverVersion = model.DefaultNvidiaDriverSeries
-				}
-				break
+// autoSelectNvidia ticks nvidia-runtime when the installer host has an NVIDIA
+// GPU, and seeds the driver series so the GPU step has a usable default.
+func (w *Wizard) autoSelectNvidia() {
+	if !w.State.NvidiaGPUDetected {
+		return
+	}
+	for i, s := range w.State.Sysexts {
+		if s.Name == "nvidia-runtime" {
+			w.State.Sysexts[i].Selected = true
+			if w.State.Config.NvidiaDriverVersion == "" {
+				w.State.Config.NvidiaDriverVersion = model.DefaultNvidiaDriverSeries
 			}
+			break
 		}
 	}
-	return nil
 }
 
 // FetchChannels loads version info for all release channels

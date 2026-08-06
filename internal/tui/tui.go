@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -36,6 +37,16 @@ type installDoneMsg struct{ err error }
 type fetchKeysMsg struct {
 	keys []string
 	err  error
+}
+
+// sysextRefreshTimeout bounds a manual catalog refresh. The catalog spans
+// several API pages, so this is more generous than a single request needs.
+const sysextRefreshTimeout = 45 * time.Second
+
+// refreshSysextMsg carries the result of an async sysext catalog re-fetch.
+type refreshSysextMsg struct {
+	entries []model.SysextEntry
+	err     error
 }
 
 // Model is the top-level Bubble Tea model
@@ -75,6 +86,7 @@ type Model struct {
 	// Sysext list (bubbles/list)
 	sysextList      list.Model
 	sysextListReady bool
+	refreshing      bool // a catalog re-fetch is in flight
 
 	// Install progress
 	spinner       spinner.Model
@@ -191,6 +203,24 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.Wizard.State.CurrentStep = model.StepDone
 		// Don't quit immediately — show Done screen, let user press q to exit
+		return m, nil
+	case refreshSysextMsg:
+		m.refreshing = false
+		if msg.err != nil {
+			// Keep whatever catalog is already on screen — a failed refresh
+			// must not throw away a list the user is midway through selecting.
+			m.Wizard.State.SysextErr = msg.err
+			m.err = msg.err
+			return m, nil
+		}
+		dropped := m.Wizard.ApplySysexts(msg.entries)
+		m.cursor = 0
+		m.initSysextList()
+		if len(dropped) > 0 {
+			m.err = fmt.Errorf("no longer in the catalog, deselected: %s", strings.Join(dropped, ", "))
+		} else {
+			m.err = nil
+		}
 		return m, nil
 	case fetchKeysMsg:
 		m.fetching = false
@@ -429,6 +459,17 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.showButane = !m.showButane
 		}
 		return m, nil
+	case "ctrl+r":
+		// Re-fetch the sysext catalog. ctrl+r rather than plain "r" because the
+		// list has filtering enabled — a bare letter belongs to the filter.
+		// Guarded on m.refreshing so a key-mash cannot open several concurrent
+		// catalog walks, each of which costs several GitHub API requests.
+		if m.Wizard.State.CurrentStep == model.StepSysext && !m.refreshing {
+			m.refreshing = true
+			m.err = nil
+			return m, m.refreshSysexts()
+		}
+		return m, nil
 	default:
 		// Delegate to sysext list for filter input and other keys.
 		if m.Wizard.State.CurrentStep == model.StepSysext && m.sysextListReady {
@@ -645,6 +686,26 @@ func (m *Model) waitForProgress() tea.Cmd {
 	}
 }
 
+// refreshSysexts re-fetches the sysext catalog off the render loop.
+//
+// The command deliberately calls the bakery client directly rather than
+// Wizard.FetchSysexts: FetchSysexts writes State.Sysexts, and this runs in a
+// goroutine while View reads that same slice. The result is applied on the
+// main loop in Update, via ApplySysexts — same split as the GitHub key fetch.
+func (m *Model) refreshSysexts() tea.Cmd {
+	client := m.Wizard.Bakery
+	arch := m.Wizard.State.Config.Arch
+	return func() tea.Msg {
+		if client == nil {
+			return refreshSysextMsg{err: fmt.Errorf("no catalog client configured")}
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), sysextRefreshTimeout)
+		defer cancel()
+		entries, err := client.FetchCatalogArch(ctx, arch)
+		return refreshSysextMsg{entries: entries, err: err}
+	}
+}
+
 func (m *Model) applyFields() {
 	cfg := &m.Wizard.State.Config
 	switch m.Wizard.State.CurrentStep {
@@ -851,7 +912,11 @@ func (m *Model) render() string {
 	}
 
 	b.WriteString("\n")
-	b.WriteString(helpStyle.Render("↑↓/jk navigate • enter confirm • esc back • q quit"))
+	help := "↑↓/jk navigate • enter confirm • esc back • q quit"
+	if m.Wizard.State.CurrentStep == model.StepSysext {
+		help = "↑↓/jk navigate • space toggle • ctrl+r refresh • enter confirm • esc back • q quit"
+	}
+	b.WriteString(helpStyle.Render(help))
 	return b.String()
 }
 
@@ -922,6 +987,31 @@ func pluralPartitions(n int) string {
 	return fmt.Sprintf("%d partitions", n)
 }
 
+// viewSysextEmpty renders the empty-catalog placeholder. It names the actual
+// failure — a rate limit and a dead network need different fixes, and the old
+// "fetch may have failed" text sent people looking at their network for a
+// problem that was neither.
+func (m *Model) viewSysextEmpty() string {
+	var b strings.Builder
+	b.WriteString("  No extensions available\n")
+
+	if err := m.Wizard.State.SysextErr; err != nil {
+		var rl *bakery.RateLimitError
+		if errors.As(err, &rl) {
+			b.WriteString(errorStyle.Render("  "+rl.Error()) + "\n")
+		} else {
+			b.WriteString(errorStyle.Render(fmt.Sprintf("  %s", err)) + "\n")
+		}
+	}
+
+	if m.refreshing {
+		b.WriteString(helpStyle.Render("  retrying…") + "\n")
+	} else {
+		b.WriteString(helpStyle.Render("  ctrl+r to retry · enter to continue without extensions") + "\n")
+	}
+	return b.String()
+}
+
 func (m *Model) viewSysext() string {
 	var b strings.Builder
 
@@ -940,8 +1030,12 @@ func (m *Model) viewSysext() string {
 		b.WriteString(gpuStyle.Render("  ✓ NVIDIA GPU detected — nvidia-runtime auto-selected · configure on next screen") + "\n\n")
 	}
 
+	if m.refreshing {
+		fmt.Fprintf(&b, "  %s Refreshing catalog…\n\n", m.spinner.View())
+	}
+
 	if len(m.Wizard.State.Sysexts) == 0 {
-		b.WriteString("  No extensions available (catalog fetch may have failed)\n")
+		b.WriteString(m.viewSysextEmpty())
 		return b.String()
 	}
 

@@ -136,9 +136,10 @@ func TestBuildTailscaleFormValidators(t *testing.T) {
 // all conditional branches in the summary builder.
 func TestReviewSummaryBranches(t *testing.T) {
 	tests := []struct {
-		name     string
-		cfg      model.InstallConfig
-		contains []string
+		name        string
+		cfg         model.InstallConfig
+		contains    []string
+		notContains []string
 	}{
 		{
 			name: "minimal config",
@@ -190,9 +191,16 @@ func TestReviewSummaryBranches(t *testing.T) {
 				Channel: "stable",
 				Disk:    model.DiskInfo{DevPath: "/dev/sda"},
 				Network: model.NetworkConfig{Mode: model.NetworkDHCP},
-				Sysexts: []model.SysextEntry{{Name: "docker"}, {Name: "tailscale"}},
+				// Only selected entries reach the summary — "cilium" is in the
+				// catalog but unticked, so it must not be listed.
+				Sysexts: []model.SysextEntry{
+					{Name: "docker", Selected: true},
+					{Name: "tailscale", Selected: true},
+					{Name: "cilium"},
+				},
 			},
-			contains: []string{"docker", "tailscale"},
+			contains:    []string{"docker", "tailscale"},
+			notContains: []string{"cilium"},
 		},
 		{
 			name: "swap enabled with explicit size",
@@ -254,6 +262,11 @@ func TestReviewSummaryBranches(t *testing.T) {
 			for _, want := range tt.contains {
 				if !strings.Contains(summary, want) {
 					t.Errorf("reviewSummary missing %q in:\n%s", want, summary)
+				}
+			}
+			for _, unwanted := range tt.notContains {
+				if strings.Contains(summary, unwanted) {
+					t.Errorf("reviewSummary unexpectedly contains %q in:\n%s", unwanted, summary)
 				}
 			}
 		})
