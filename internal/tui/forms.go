@@ -330,21 +330,27 @@ func (m *Model) buildBreadcrumb() string {
 	return m.renderZenChrome()
 }
 
+// chromeShort reports whether the terminal is too short to spend eleven lines
+// on the banner. Serial consoles and IPMI/iKVM viewers are typically 80x25,
+// where the full logo would eat nearly half the screen.
+func (m *Model) chromeShort() bool {
+	return m.height > 0 && m.height < 34
+}
+
 // renderZenChrome creates the ANSI-art inspired header.
 // Aesthetic: clean framed letterform, cool blue palette, scene-era vibes.
 // Info shown via color hierarchy — version numbers always visible.
 func (m *Model) renderZenChrome() string {
+	if m.chromeShort() {
+		return m.renderZenChromeCompact()
+	}
+
 	var b strings.Builder
 
 	// Color palette
 	logoHi := lipgloss.NewStyle().Foreground(lipgloss.Color("51")).Bold(true)
 	logoLo := lipgloss.NewStyle().Foreground(lipgloss.Color("39"))
-	dimColor := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
-	infoColor := lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
 	accentColor := lipgloss.NewStyle().Foreground(lipgloss.Color("75"))
-	okDot := lipgloss.NewStyle().Foreground(lipgloss.Color("42"))
-	warnDot := lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
-	failDot := lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
 	presentsStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("245")).Italic(true)
 	sloganStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("250")).Italic(true)
 
@@ -369,55 +375,110 @@ func (m *Model) renderZenChrome() string {
 	b.WriteString("\n\n")
 
 	// Info line: version + system dots (skip on Welcome — cards show it)
-	cfg := &m.Wizard.State.Config
 	if m.Wizard.State.CurrentStep != model.StepWelcome {
-
-		// Channel as label, versions as tight key:value with │ separators
-		var verInfo string
-		if len(m.Wizard.State.Channels) > 0 {
-			for _, ch := range m.Wizard.State.Channels {
-				if ch.Channel == cfg.Channel {
-					verInfo = accentColor.Render(ch.Channel) +
-						dimColor.Render(" \u2502 ") +
-						infoColor.Render("v"+ch.Version) +
-						dimColor.Render(" \u2502 ") +
-						infoColor.Render("linux "+ch.Kernel) +
-						dimColor.Render(" \u2502 ") +
-						infoColor.Render("systemd "+ch.Systemd)
-					break
-				}
-			}
-		}
-		if verInfo == "" {
-			verInfo = accentColor.Render(cfg.Channel)
-		}
-
 		b.WriteString("  ")
-		b.WriteString(verInfo)
-
-		if len(m.Wizard.State.SystemChecks) > 0 {
-			b.WriteString(dimColor.Render("  \u2502  "))
-			for i, check := range m.Wizard.State.SystemChecks {
-				switch check.Status {
-				case "ok":
-					b.WriteString(okDot.Render("\u25cf"))
-				case "warn":
-					b.WriteString(warnDot.Render("\u25cf"))
-				default:
-					b.WriteString(failDot.Render("\u25cf"))
-				}
-				if i < len(m.Wizard.State.SystemChecks)-1 {
-					b.WriteString(" ")
-				}
-			}
-		}
+		b.WriteString(m.chromeInfoLine())
 		b.WriteString("\n")
 	} // end if not Welcome
 
 	// Step progress: thin line
+	b.WriteString("  ")
+	b.WriteString(m.chromeStepProgress())
+	b.WriteString("\n\n")
+
+	return b.String()
+}
+
+// renderZenChromeCompact is the three-line header used on short terminals: the
+// wordmark, the version/health line, and the step progress bar. It trades the
+// framed logo for the eight lines the wizard body needs on an 80x25 console.
+func (m *Model) renderZenChromeCompact() string {
+	logoHi := lipgloss.NewStyle().Foreground(lipgloss.Color("51")).Bold(true)
+	accentColor := lipgloss.NewStyle().Foreground(lipgloss.Color("75"))
+	dimColor := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+
+	var b strings.Builder
+	b.WriteString("  " + logoHi.Render("K N U C K L E"))
+	b.WriteString(dimColor.Render("  \u00b7  "))
+	b.WriteString(accentColor.Render("homelab ignition configurator"))
+	b.WriteString("\n")
+
+	if m.Wizard.State.CurrentStep != model.StepWelcome {
+		b.WriteString("  ")
+		b.WriteString(m.chromeInfoLine())
+		b.WriteString("\n")
+	}
+
+	// Single trailing newline: render() adds the blank separator line itself.
+	b.WriteString("  ")
+	b.WriteString(m.chromeStepProgress())
+	b.WriteString("\n")
+
+	return b.String()
+}
+
+// chromeInfoLine renders the channel/version/kernel/systemd summary followed by
+// the system-check status dots.
+func (m *Model) chromeInfoLine() string {
+	dimColor := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+	infoColor := lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
+	accentColor := lipgloss.NewStyle().Foreground(lipgloss.Color("75"))
+	okDot := lipgloss.NewStyle().Foreground(lipgloss.Color("42"))
+	warnDot := lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
+	failDot := lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
+
+	cfg := &m.Wizard.State.Config
+
+	// Channel as label, versions as tight key:value with \u2502 separators
+	var verInfo string
+	for _, ch := range m.Wizard.State.Channels {
+		if ch.Channel == cfg.Channel {
+			verInfo = accentColor.Render(ch.Channel) +
+				dimColor.Render(" \u2502 ") +
+				infoColor.Render("v"+ch.Version) +
+				dimColor.Render(" \u2502 ") +
+				infoColor.Render("linux "+ch.Kernel) +
+				dimColor.Render(" \u2502 ") +
+				infoColor.Render("systemd "+ch.Systemd)
+			break
+		}
+	}
+	if verInfo == "" {
+		verInfo = accentColor.Render(cfg.Channel)
+	}
+
+	var b strings.Builder
+	b.WriteString(verInfo)
+
+	if len(m.Wizard.State.SystemChecks) > 0 {
+		b.WriteString(dimColor.Render("  \u2502  "))
+		for i, check := range m.Wizard.State.SystemChecks {
+			switch check.Status {
+			case "ok":
+				b.WriteString(okDot.Render("\u25cf"))
+			case "warn":
+				b.WriteString(warnDot.Render("\u25cf"))
+			default:
+				b.WriteString(failDot.Render("\u25cf"))
+			}
+			if i < len(m.Wizard.State.SystemChecks)-1 {
+				b.WriteString(" ")
+			}
+		}
+	}
+	return b.String()
+}
+
+// chromeStepProgress renders the thin step-progress line.
+func (m *Model) chromeStepProgress() string {
+	logoHi := lipgloss.NewStyle().Foreground(lipgloss.Color("51")).Bold(true)
+	dimColor := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+	accentColor := lipgloss.NewStyle().Foreground(lipgloss.Color("75"))
+
 	steps := 8
 	current := int(m.Wizard.State.CurrentStep)
-	b.WriteString("  ")
+
+	var b strings.Builder
 	for i := 0; i < steps; i++ {
 		if i < current {
 			b.WriteString(accentColor.Render("\u2501\u2501"))
@@ -430,8 +491,6 @@ func (m *Model) renderZenChrome() string {
 			b.WriteString(dimColor.Render("\u00b7"))
 		}
 	}
-	b.WriteString("\n\n")
-
 	return b.String()
 }
 

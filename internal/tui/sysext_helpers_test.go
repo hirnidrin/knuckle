@@ -8,26 +8,6 @@ import (
 	"github.com/projectbluefin/knuckle/internal/model"
 )
 
-func TestRenderTierHeaderWithName(t *testing.T) {
-	out := renderTierHeader("Integrated")
-	if !strings.Contains(out, "Integrated") {
-		t.Errorf("renderTierHeader should contain tier name, got: %q", out)
-	}
-	if !strings.Contains(out, "──") {
-		t.Error("header should contain dashes for styling")
-	}
-}
-
-func TestRenderTierHeaderEmptyFallback(t *testing.T) {
-	out := renderTierHeader("")
-	if !strings.Contains(out, "Other") {
-		t.Errorf("renderTierHeader(\"\") should fallback to 'Other', got: %q", out)
-	}
-	if !strings.Contains(out, "──") {
-		t.Error("header should contain dashes for styling")
-	}
-}
-
 func TestSysextTitleNoSelection(t *testing.T) {
 	w := newTestWizard()
 	w.State.Sysexts = []model.SysextEntry{

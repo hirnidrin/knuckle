@@ -2,10 +2,15 @@ package tui
 
 import (
 	"bytes"
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
 	"charm.land/bubbles/v2/list"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
+
 	"github.com/projectbluefin/knuckle/internal/bakery"
 	"github.com/projectbluefin/knuckle/internal/model"
 )
@@ -138,32 +143,6 @@ func TestSysextDelegateRender_ListScenarios(t *testing.T) {
 	}
 }
 
-func TestRenderTierHeader(t *testing.T) {
-	tests := []struct {
-		name string
-		tier string
-		want string
-	}{
-		{name: "named tier", tier: bakery.TierIntegrated, want: bakery.TierIntegrated},
-		{name: "empty tier falls back to Other", tier: "", want: "Other"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := renderTierHeader(tt.tier)
-			if !strings.Contains(got, tt.want) {
-				t.Fatalf("renderTierHeader(%q) = %q, want substring %q", tt.tier, got, tt.want)
-			}
-			if !strings.HasPrefix(got, "  ") {
-				t.Fatalf("renderTierHeader(%q) = %q, want two-space indent", tt.tier, got)
-			}
-			if !strings.HasSuffix(got, "\n") {
-				t.Fatalf("renderTierHeader(%q) = %q, want trailing newline", tt.tier, got)
-			}
-		})
-	}
-}
-
 func TestSysextTitle(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -197,5 +176,142 @@ func TestSysextTitle(t *testing.T) {
 				t.Fatalf("sysextTitle() = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+// ── layout invariants ────────────────────────────────────────────────────────
+
+// testSysextEntries builds a catalog large enough to overflow any page.
+func testSysextEntries() []model.SysextEntry {
+	tiers := []string{bakery.TierIntegrated, bakery.TierMaintained, bakery.TierExperimental, ""}
+	entries := make([]model.SysextEntry, 0, 24)
+	for i := range 24 {
+		entries = append(entries, model.SysextEntry{
+			Name:        fmt.Sprintf("ext-%02d", i),
+			Version:     "1.2.3",
+			Category:    "Networking",
+			SupportTier: tiers[i%len(tiers)],
+			Description: strings.Repeat("long description text ", 20),
+		})
+	}
+	return entries
+}
+
+// TestSysextDelegateRender_LineCountMatchesHeight is the invariant the whole
+// sysext screen rests on: bubbles/list sizes pages from Height() and appends
+// the separator newline itself, so an item that renders a different number of
+// lines silently pushes the tail of every page off the bottom of the terminal.
+func TestSysextDelegateRender_LineCountMatchesHeight(t *testing.T) {
+	entries := []model.SysextEntry{
+		{Name: "docker", Version: "24.0", Category: "Container", SupportTier: bakery.TierIntegrated},
+		{Name: "tailscale", Version: "1.50", Category: "Network", SupportTier: bakery.TierMaintained},
+		{Name: "custom", SupportTier: ""},
+	}
+	items := make([]list.Item, len(entries))
+	for i, e := range entries {
+		items[i] = sysextItem{idx: i, entry: e}
+	}
+
+	for _, compact := range []bool{false, true} {
+		t.Run(fmt.Sprintf("compact=%v", compact), func(t *testing.T) {
+			d := newSysextDelegate(func(idx int) bool { return idx == 0 })
+			d.compact = compact
+			l := newTestList(items, d)
+
+			for i := range items {
+				var buf bytes.Buffer
+				d.Render(&buf, l, i, items[i])
+				got := strings.Count(buf.String(), "\n") + 1
+				if got != d.Height() {
+					t.Fatalf("item %d rendered %d lines, want Height() = %d: %q",
+						i, got, d.Height(), buf.String())
+				}
+				if strings.HasSuffix(buf.String(), "\n") {
+					t.Fatalf("item %d ends with a newline; the list adds the separator itself", i)
+				}
+			}
+		})
+	}
+}
+
+// TestViewSysext_FitsTerminalHeight covers the reported failure: on an 80x25
+// IPMI/iKVM console the screen ran off the bottom, hiding the status line and
+// stranding entries that the cursor could never reach.
+func TestViewSysext_FitsTerminalHeight(t *testing.T) {
+	sizes := []struct{ w, h int }{
+		{80, 24}, {80, 25}, {80, 30}, {80, 45}, {100, 34}, {100, 40}, {120, 50}, {200, 60},
+	}
+
+	for _, size := range sizes {
+		t.Run(fmt.Sprintf("%dx%d", size.w, size.h), func(t *testing.T) {
+			for _, withErr := range []bool{false, true} {
+				w := newTestWizard()
+				w.State.CurrentStep = model.StepSysext
+				w.State.Sysexts = testSysextEntries()
+				w.State.NvidiaGPUDetected = withErr
+				m := New(w)
+				m.width, m.height = size.w, size.h
+				if withErr {
+					m.err = errors.New(strings.Repeat("catalog refresh failed ", 6))
+				}
+				m.resizeSysextList()
+
+				rows := 0
+				for _, line := range strings.Split(m.render(), "\n") {
+					rows += max(1, (lipgloss.Width(line)+size.w-1)/size.w)
+				}
+				if rows > size.h {
+					t.Fatalf("err=%v: rendered %d rows, terminal has %d", withErr, rows, size.h)
+				}
+			}
+		})
+	}
+}
+
+// TestSysextListPagination_ReachesEveryEntry walks the cursor from the first
+// entry to the last and requires each one to actually appear on screen — the
+// symptom in the bug report was entries that scrolled past between pages.
+func TestSysextListPagination_ReachesEveryEntry(t *testing.T) {
+	w := newTestWizard()
+	w.State.CurrentStep = model.StepSysext
+	w.State.Sysexts = testSysextEntries()
+	m := New(w)
+	m.width, m.height = 80, 25
+	m.resizeSysextList()
+
+	for i := range w.State.Sysexts {
+		m.sysextList.Select(m.sysextListLookup(i))
+		m.cursor = i
+		if name := w.State.Sysexts[i].Name; !strings.Contains(m.render(), name) {
+			t.Fatalf("entry %d (%s) is not visible when it is the cursor item", i, name)
+		}
+	}
+}
+
+// TestResizeSysextList_SwitchesDensity verifies that a WindowSizeMsg re-fits an
+// already-built list rather than leaving it sized for the previous terminal.
+func TestResizeSysextList_SwitchesDensity(t *testing.T) {
+	w := newTestWizard()
+	w.State.CurrentStep = model.StepSysext
+	w.State.Sysexts = testSysextEntries()
+	m := New(w)
+
+	m.Update(tea.WindowSizeMsg{Width: 80, Height: 25})
+	if !m.sysextListCompact {
+		t.Fatal("80x25 should use the compact one-line layout")
+	}
+	if got := m.sysextList.Height(); got != m.sysextListHeight() {
+		t.Fatalf("list height = %d, want %d after resize", got, m.sysextListHeight())
+	}
+
+	m.Update(tea.WindowSizeMsg{Width: 160, Height: 60})
+	if m.sysextListCompact {
+		t.Fatal("160x60 should use the roomy two-line layout")
+	}
+	if got := m.sysextList.Height(); got != m.sysextListHeight() {
+		t.Fatalf("list height = %d, want %d after resize", got, m.sysextListHeight())
+	}
+	if got := m.sysextList.Width(); got != 160 {
+		t.Fatalf("list width = %d, want 160 after resize", got)
 	}
 }

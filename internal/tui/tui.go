@@ -27,6 +27,10 @@ var (
 	helpStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("241")).MarginTop(1)
 )
 
+// nvidiaSysextNotice is the one-line pointer to the GPU Setup screen shown on
+// the sysext step. Kept as a constant so the layout can budget for its height.
+const nvidiaSysextNotice = "✓ NVIDIA GPU detected — nvidia-runtime auto-selected · configure on next screen"
+
 // installProgressMsg carries a progress line from the install goroutine.
 type installProgressMsg string
 
@@ -84,9 +88,10 @@ type Model struct {
 	osSubView bool
 
 	// Sysext list (bubbles/list)
-	sysextList      list.Model
-	sysextListReady bool
-	refreshing      bool // a catalog re-fetch is in flight
+	sysextList        list.Model
+	sysextListReady   bool
+	sysextListCompact bool // list is using one-line rows for a short terminal
+	refreshing        bool // a catalog re-fetch is in flight
 
 	// Install progress
 	spinner       spinner.Model
@@ -171,6 +176,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
+		// Re-fit the sysext list so its pagination matches the new size before
+		// the next keypress is handled.
+		m.resizeSysextList()
 		// Forward to active form so it knows its rendering width
 		if m.activeForm != nil {
 			form, cmd := m.activeForm.Update(msg)
@@ -914,10 +922,26 @@ func (m *Model) render() string {
 	b.WriteString("\n")
 	help := "↑↓/jk navigate • enter confirm • esc back • q quit"
 	if m.Wizard.State.CurrentStep == model.StepSysext {
-		help = "↑↓/jk navigate • space toggle • ctrl+r refresh • enter confirm • esc back • q quit"
+		help = m.sysextHelp()
 	}
 	b.WriteString(helpStyle.Render(help))
 	return b.String()
+}
+
+// sysextHelp returns the footer help for the sysext step, abbreviated as needed
+// so it stays on one line — a wrapped footer costs the list an entry.
+func (m *Model) sysextHelp() string {
+	candidates := []string{
+		"↑↓/jk navigate • space toggle • / filter • ctrl+r refresh • enter confirm • esc back • q quit",
+		"↑↓ • space toggle • / filter • ctrl+r refresh • enter ok • esc back • q quit",
+		"↑↓ • space • / filter • ctrl+r • enter • esc • q",
+	}
+	for _, c := range candidates {
+		if m.width <= 0 || lipgloss.Width(c) <= m.width {
+			return c
+		}
+	}
+	return candidates[len(candidates)-1]
 }
 
 func (m *Model) viewStorage() string {
@@ -1015,19 +1039,17 @@ func (m *Model) viewSysextEmpty() string {
 func (m *Model) viewSysext() string {
 	var b strings.Builder
 
-	// Selected count header.
-	selectedCount := 0
-	for _, ext := range m.Wizard.State.Sysexts {
-		if ext.Selected {
-			selectedCount++
-		}
+	// Selected count header. The bubbles/list draws its own title, so only the
+	// fallback path below needs to print one — duplicating it costs two lines
+	// that short terminals cannot spare.
+	if !m.sysextListReady {
+		fmt.Fprintf(&b, "%s\n\n", m.sysextTitle())
 	}
-	fmt.Fprintf(&b, "System Extensions — %d selected\n\n", selectedCount)
 
 	// Brief GPU notice — full configuration is on the dedicated GPU Setup screen.
 	if m.Wizard.State.NvidiaGPUDetected {
 		gpuStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("76"))
-		b.WriteString(gpuStyle.Render("  ✓ NVIDIA GPU detected — nvidia-runtime auto-selected · configure on next screen") + "\n\n")
+		b.WriteString(gpuStyle.Render("  "+nvidiaSysextNotice) + "\n\n")
 	}
 
 	if m.refreshing {
@@ -1041,6 +1063,10 @@ func (m *Model) viewSysext() string {
 
 	// Use bubbles/list if initialized.
 	if m.sysextListReady {
+		// Re-fit before drawing: the notices above and the detail panel below
+		// change the space the list is allowed to take.
+		m.resizeSysextList()
+
 		// Sync cursor → list position.
 		listIdx := m.sysextListLookup(m.cursor)
 		if m.sysextList.Index() != listIdx {
@@ -1125,6 +1151,14 @@ func (m *Model) viewSysext() string {
 	return b.String()
 }
 
+// detailPanelLines is how many content lines the sysext detail panel may use.
+// It is fixed for a given terminal size so the list above it does not change
+// height (and reshuffle its pages) as the cursor moves between entries.
+func (m *Model) detailPanelLines() int {
+	_, lines := m.sysextLayout()
+	return lines
+}
+
 // renderDetailPanel renders the expandable info box for the highlighted sysext entry.
 // Uses m.width for terminal-width-aware sizing; returns empty string when terminal is too narrow.
 func (m *Model) renderDetailPanel(ext model.SysextEntry) string {
@@ -1133,6 +1167,10 @@ func (m *Model) renderDetailPanel(ext model.SysextEntry) string {
 		effectiveWidth = 80
 	}
 	if effectiveWidth < 60 {
+		return ""
+	}
+	budget := m.detailPanelLines()
+	if budget == 0 {
 		return ""
 	}
 
@@ -1162,18 +1200,33 @@ func (m *Model) renderDetailPanel(ext model.SysextEntry) string {
 
 	contentWidth := panelWidth - 2 // subtract the "│ " and " │" borders
 
-	var lines []string
-	lines = append(lines, fmt.Sprintf("Version:  %s", version))
-	lines = append(lines, fmt.Sprintf("Category: %s", cat))
-	lines = append(lines, fmt.Sprintf("Support:  %s", tier))
-	lines = append(lines, "")
-	lines = append(lines, wordWrap(longDesc, contentWidth)...)
+	head := []string{
+		fmt.Sprintf("Version:  %s", version),
+		fmt.Sprintf("Category: %s", cat),
+		fmt.Sprintf("Support:  %s", tier),
+	}
 
+	body := append([]string{""}, wordWrap(longDesc, contentWidth)...)
+
+	var tail []string
 	if len(caveats) > 0 {
-		lines = append(lines, "")
+		tail = append(tail, "")
 		for _, c := range caveats {
-			lines = append(lines, wordWrap("! "+c, contentWidth)...)
+			tail = append(tail, wordWrap("! "+c, contentWidth)...)
 		}
+	}
+
+	// Fit to the budget by trimming the description first — the caveats are
+	// warnings and must not be the thing that falls off a short terminal.
+	if avail := budget - len(head) - len(tail); avail < len(body) {
+		body = body[:max(0, avail)]
+	}
+	lines := append(append(head, body...), tail...)
+	if len(lines) > budget {
+		lines = lines[:budget]
+	}
+	for len(lines) < budget {
+		lines = append(lines, "")
 	}
 
 	indent := "        " // 8 spaces
