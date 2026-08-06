@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -32,6 +33,44 @@ const (
 	// maxCatalogPages caps the number of API pages fetched to prevent unbounded loops.
 	maxCatalogPages = 10
 )
+
+// RateLimitError reports an exhausted GitHub API rate limit. The catalog comes
+// from the GitHub Releases API, which allows 60 requests per hour per source IP
+// without authentication — and the catalog spans several pages, so a handful of
+// installer boots behind one NAT is enough to exhaust it.
+//
+// Resets carries the reset instant from the X-RateLimit-Reset response header,
+// or the zero time when that header is missing or unparseable.
+type RateLimitError struct {
+	Resets time.Time
+}
+
+func (e *RateLimitError) Error() string {
+	const base = "GitHub API rate limit reached (60 req/h per IP without auth)"
+	if e.Resets.IsZero() {
+		return base + " — set GITHUB_TOKEN to raise the limit"
+	}
+	return fmt.Sprintf("%s; resets at %s — set GITHUB_TOKEN to raise the limit",
+		base, e.Resets.UTC().Format("15:04 MST"))
+}
+
+// rateLimitError returns a *RateLimitError when resp is a rate-limit rejection,
+// and nil when it is any other failure. GitHub signals exhaustion with 403 or
+// 429 *plus* X-RateLimit-Remaining: 0 — a bare 403 is an auth or permission
+// failure and must not be reported to the user as a rate limit.
+func rateLimitError(resp *http.Response) *RateLimitError {
+	if resp.StatusCode != http.StatusForbidden && resp.StatusCode != http.StatusTooManyRequests {
+		return nil
+	}
+	if resp.Header.Get("X-RateLimit-Remaining") != "0" {
+		return nil
+	}
+	e := &RateLimitError{}
+	if sec, err := strconv.ParseInt(resp.Header.Get("X-RateLimit-Reset"), 10, 64); err == nil && sec > 0 {
+		e.Resets = time.Unix(sec, 0)
+	}
+	return e
+}
 
 // Client is the interface for fetching the sysext catalog
 type Client interface {
@@ -132,7 +171,11 @@ func (c *HTTPClient) FetchCatalogArch(ctx context.Context, arch string) ([]model
 		}
 
 		if resp.StatusCode != http.StatusOK {
+			rlErr := rateLimitError(resp)
 			_ = resp.Body.Close()
+			if rlErr != nil {
+				return nil, rlErr
+			}
 			return nil, fmt.Errorf("catalog returned status %d", resp.StatusCode)
 		}
 
